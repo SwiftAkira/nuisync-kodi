@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+  <category label="Network">
+    <setting id="hamachi_ip"
+             type="text"
+             label="Hamachi IP (Host's 25.x.x.x)"
+             default="25.0.0.1"/>
+    <setting id="port"
+             type="number"
+             label="Port"
+             default="9876"/>
+    <setting id="auto_reconnect"
+             type="bool"
+             label="Auto-reconnect on disconnect"
+             default="true"/>
+    <setting id="reconnect_attempts"
+             type="number"
+             label="Reconnect attempts"
+             default="5"
+             visible="eq(-1,true)"/>
+    <setting id="reconnect_delay"
+             type="number"
+             label="Seconds between reconnect attempts"
+             default="3"
+             visible="eq(-2,true)"/>
+  </category>
+  <category label="Sync">
+    <setting id="sync_tolerance"
+             type="slider"
+             label="Sync tolerance (seconds)"
+             default="2.0"
+             range="1.0,0.5,10.0"
+             option="float"/>
+    <setting id="hard_seek_threshold"
+             type="slider"
+             label="Hard seek threshold (seconds)"
+             default="15.0"
+             range="5.0,1.0,30.0"
+             option="float"/>
+    <setting id="speed_max"
+             type="slider"
+             label="Max catch-up speed"
+             default="1.5"
+             range="1.1,0.1,2.0"
+             option="float"/>
+    <setting id="speed_min"
+             type="slider"
+             label="Min slow-down speed"
+             default="0.8"
+             range="0.5,0.05,0.95"
+             option="float"/>
+  </category>
+</settings>
