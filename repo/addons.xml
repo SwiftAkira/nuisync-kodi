@@ -1,41 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <addons>
-  <addon id="plugin.video.nuisync"
-         name="NuiSync"
-         version="1.0.0"
-         provider-name="NuiSync">
-    <requires>
-      <import addon="xbmc.python" version="3.0.0"/>
-    </requires>
-    <extension point="xbmc.python.pluginsource"
-               library="default.py">
-      <provides>video</provides>
-    </extension>
-    <extension point="xbmc.service"
-               library="service.py"/>
-    <extension point="xbmc.addon.metadata">
-      <summary lang="en">Sync Kodi playback with a friend~ over Hamachi LAN</summary>
-      <description lang="en">NuiSync lets you watch together in perfect harmony! Host or join a cozy watch session to sync play, pause, seek, and stop between two Kodi instances over a Hamachi virtual LAN. Pure Python sockets, no extra dependencies~ Works beautifully with Fen Light, Cocoscrapers, and TorBox.</description>
-      <platform>all</platform>
-      <license>MIT</license>
-    </extension>
-  </addon>
-  <addon id="repository.nuisync"
-         name="NuiSync Repository"
-         version="1.0.0"
-         provider-name="NuiSync">
-    <extension point="xbmc.addon.repository"
-               name="NuiSync Repository~">
-      <dir>
-        <info compressed="false">https://swiftakira.github.io/nuisync-kodi/repo/addons.xml</info>
-        <checksum>https://swiftakira.github.io/nuisync-kodi/repo/addons.xml.md5</checksum>
-        <datadir zip="true">https://swiftakira.github.io/nuisync-kodi/repo/</datadir>
-      </dir>
-    </extension>
-    <extension point="xbmc.addon.metadata">
-      <summary lang="en">NuiSync repo~ Install and update NuiSync from here!</summary>
-      <description lang="en">The official NuiSync repository for Kodi. Provides automatic updates for the NuiSync watch-together addon~</description>
-      <platform>all</platform>
-    </extension>
-  </addon>
+  <addon id="plugin.video.nuisync" name="NuiSync" version="1.0.0" provider-name="NuiSync">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0" />
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+    <provides>video</provides>
+  </extension>
+  <extension point="xbmc.service" library="service.py" />
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en">Sync Kodi playback with a friend~ over Hamachi LAN</summary>
+    <description lang="en">NuiSync lets you watch together in perfect harmony! Host or join a cozy watch session to sync play, pause, seek, and stop between two Kodi instances over a Hamachi virtual LAN. Pure Python sockets, no extra dependencies~ Works beautifully with Fen Light, Cocoscrapers, and TorBox.</description>
+    <platform>all</platform>
+    <license>MIT</license>
+  </extension>
+</addon>
+  <addon id="repository.nuisync" name="NuiSync Repository" version="1.0.0" provider-name="NuiSync">
+  <extension point="xbmc.addon.repository" name="NuiSync Repository~">
+    <dir>
+      <info compressed="false">https://swiftakira.github.io/nuisync-kodi/repo/addons.xml</info>
+      <checksum>https://swiftakira.github.io/nuisync-kodi/repo/addons.xml.md5</checksum>
+      <datadir zip="true">https://swiftakira.github.io/nuisync-kodi/repo/</datadir>
+    </dir>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en">NuiSync repo~ Install and update NuiSync from here!</summary>
+    <description lang="en">The official NuiSync repository for Kodi. Provides automatic updates for the NuiSync watch-together addon~</description>
+    <platform>all</platform>
+  </extension>
+</addon>
 </addons>

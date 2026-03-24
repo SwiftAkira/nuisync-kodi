@@ -5,15 +5,18 @@ Host is the single source of truth:
     - Host sends play/pause/resume/seek/stop commands + periodic sync
     - Host NEVER adjusts its own playback based on the client
     - Client receives commands and applies them locally
-    - Client adjusts playback speed to gradually catch up or slow
-      down, avoiding jarring hard seeks
 
-Speed-based sync (smooth and comfy~):
-    - Drift < tolerance (2s):  do nothing, play at 1.0x
-    - Drift between tolerance and hard_seek_threshold:
-        Behind -> speed up (1.2x / 1.5x)
-        Ahead  -> slow down (0.8x)
-    - Drift > hard_seek_threshold (15s): hard seek as last resort
+Hybrid pause + seek sync (smooth and comfy~):
+    - Drift < tolerance (2s):  do nothing
+    - Client BEHIND by 2-15s:  seek forward to host position
+    - Client AHEAD by 2-5s:    micro-pause (briefly pause, let host
+                                catch up, auto-resume)
+    - Client AHEAD by 5-15s:   seek to host position
+    - Drift > hard_seek_threshold (15s): emergency hard seek
+
+Drift smoothing prevents over-correction from network jitter:
+    require 2+ consistent readings before correcting, plus a
+    cooldown between corrections.
 
 Fen Light / Cocoscrapers / TorBox integration:
     Works automatically -- Kodi fires the same Player callbacks
@@ -22,7 +25,6 @@ Fen Light / Cocoscrapers / TorBox integration:
 """
 
 import time
-import json
 import threading
 
 import xbmc
@@ -31,9 +33,17 @@ import xbmcgui
 # How often the host sends its position to the client
 SYNC_INTERVAL = 2.0
 
-# Kodi supports these tempo speeds (pitch-corrected audio)
-# We pick from this set for smooth speed adjustment
-TEMPO_SPEEDS = [0.8, 1.0, 1.2, 1.5]
+# Max seconds to correct via micro-pause (beyond this, seek instead)
+MICRO_PAUSE_MAX = 5.0
+
+# Estimated one-way network delay for Hamachi
+LATENCY_COMPENSATION = 0.5
+
+# Number of drift readings required before correcting
+DRIFT_HISTORY_SIZE = 3
+
+# Minimum seconds between corrections
+CORRECTION_COOLDOWN = 4.0
 
 
 class NuiSyncPlayer(xbmc.Player):
@@ -47,19 +57,14 @@ class NuiSyncPlayer(xbmc.Player):
             is_host:              True if this side is the authority.
             desync_tolerance:     Seconds of drift before any correction.
             hard_seek_threshold:  Seconds of drift before hard seeking.
-            speed_max:            Max playback speed for catching up.
-            speed_min:            Min playback speed for slowing down.
+            speed_max:            (unused, kept for service.py compat)
+            speed_min:            (unused, kept for service.py compat)
         """
         super(NuiSyncPlayer, self).__init__()
         self._net = network
         self._is_host = is_host
         self._tolerance = desync_tolerance
         self._hard_seek_threshold = hard_seek_threshold
-        self._speed_max = speed_max
-        self._speed_min = speed_min
-
-        # Current adjusted speed (1.0 = normal)
-        self._current_speed = 1.0
 
         # Thread-safe suppression to prevent echo loops.
         # When we apply a remote command, we set a timestamp; any local
@@ -74,6 +79,11 @@ class NuiSyncPlayer(xbmc.Player):
         # Sync heartbeat thread (host only)
         self._sync_thread = None
         self._sync_running = False
+
+        # Drift smoothing state (client only)
+        self._drift_history = []
+        self._last_correction_time = 0.0
+        self._pause_correction_active = False
 
     # ==================================================================
     #  Suppression helpers
@@ -164,6 +174,7 @@ class NuiSyncPlayer(xbmc.Player):
             t = msg.get("time", 0.0)
             xbmc.log("[NuiSync] Remote play: %s @ %.1f" % (url, t),
                      xbmc.LOGINFO)
+            self._drift_history.clear()
             if self.isPlaying() and self._current_url() == url:
                 self.seekTime(t)
             else:
@@ -178,34 +189,33 @@ class NuiSyncPlayer(xbmc.Player):
                         xbmcgui.NOTIFICATION_WARNING, 4000)
                     return
                 self._deferred_seek(t)
-            self._reset_speed()
 
         elif cmd == "pause":
             t = msg.get("time", 0.0)
             xbmc.log("[NuiSync] Remote pause @ %.1f" % t, xbmc.LOGINFO)
+            self._drift_history.clear()
             if self.isPlaying():
                 self._ensure_paused()
                 self.seekTime(t)
-            self._reset_speed()
 
         elif cmd == "resume":
             t = msg.get("time", 0.0)
             xbmc.log("[NuiSync] Remote resume @ %.1f" % t, xbmc.LOGINFO)
+            self._drift_history.clear()
             if self.isPlaying():
                 self._ensure_playing()
                 self.seekTime(t)
-            self._reset_speed()
 
         elif cmd == "seek":
             t = msg.get("time", 0.0)
             xbmc.log("[NuiSync] Remote seek -> %.1f" % t, xbmc.LOGINFO)
+            self._drift_history.clear()
             if self.isPlaying():
                 self.seekTime(t)
-            self._reset_speed()
 
         elif cmd == "stop":
             xbmc.log("[NuiSync] Remote stop", xbmc.LOGINFO)
-            self._reset_speed()
+            self._drift_history.clear()
             self.stop()
 
         elif cmd == "sync":
@@ -218,17 +228,20 @@ class NuiSyncPlayer(xbmc.Player):
             self._peer_buffering = msg.get("state", False)
 
     # ==================================================================
-    #  Speed-based sync (CLIENT ONLY -- smooth and comfy~)
+    #  Hybrid pause + seek sync (CLIENT ONLY -- smooth and comfy~)
     # ==================================================================
 
     def _handle_sync(self, host_time):
-        """Gradually adjust client speed to match the host position.
+        """Correct client drift using pause or seek.
 
-        Instead of jarring hard seeks, we speed up or slow down:
-            - Within tolerance:  1.0x (do nothing)
-            - Behind by 2-15s:   1.2x or 1.5x
-            - Ahead:             0.8x
-            - Beyond threshold:  hard seek as last resort
+        Uses drift smoothing to avoid over-correction from network
+        jitter: requires multiple consistent readings before acting.
+
+            - Within tolerance:       do nothing
+            - Behind by 2-15s:        seek forward
+            - Ahead by 2-5s:          micro-pause to let host catch up
+            - Ahead by 5-15s:         seek to host position
+            - Beyond threshold (15s): emergency hard seek
         """
         if self._is_host or not self.isPlaying():
             return
@@ -247,99 +260,104 @@ class NuiSyncPlayer(xbmc.Player):
         if total_time > 0 and host_time > total_time:
             return
 
+        # Compensate for network latency (host is likely further along
+        # than the timestamp says by the time we receive it)
+        adjusted_host_time = host_time + LATENCY_COMPENSATION
+
         # drift > 0 means client is BEHIND the host
-        drift = host_time - local_time
+        drift = adjusted_host_time - local_time
         abs_drift = abs(drift)
+        now = time.time()
 
-        if abs_drift <= self._tolerance:
-            # Within tolerance -- play at normal speed
-            if self._current_speed != 1.0:
-                xbmc.log("[NuiSync] Drift %.1fs within tolerance, "
-                         "restoring 1.0x~" % drift, xbmc.LOGINFO)
-                self._set_playback_speed(1.0)
-            return
-
+        # Emergency: huge drift, skip smoothing and seek immediately
         if abs_drift > self._hard_seek_threshold:
-            # Way too far off -- hard seek as a last resort
-            xbmc.log("[NuiSync] Drift %.1fs exceeds threshold, "
-                     "hard seeking to %.1f" % (drift, host_time),
-                     xbmc.LOGINFO)
-            self._suppress_for(0.5)
-            self.seekTime(host_time)
-            self._set_playback_speed(1.0)
+            xbmc.log("[NuiSync] Emergency seek: drift %.1fs -> %.1f" %
+                     (drift, adjusted_host_time), xbmc.LOGINFO)
+            self._seek_correction(adjusted_host_time)
             return
 
-        # Between tolerance and threshold -- speed correction
-        if drift > 0:
-            # Client is behind -- speed up~
-            target_speed = self._pick_catchup_speed(abs_drift)
-            if target_speed != self._current_speed:
-                xbmc.log("[NuiSync] Behind by %.1fs -> %.1fx" %
-                         (abs_drift, target_speed), xbmc.LOGINFO)
-                self._set_playback_speed(target_speed)
-        else:
-            # Client is ahead -- slow down~
-            target_speed = self._speed_min
-            target_speed = self._nearest_tempo(target_speed)
-            if target_speed != self._current_speed:
-                xbmc.log("[NuiSync] Ahead by %.1fs -> %.1fx" %
-                         (abs_drift, target_speed), xbmc.LOGINFO)
-                self._set_playback_speed(target_speed)
+        # Record drift history for smoothing
+        self._drift_history.append((now, drift))
+        if len(self._drift_history) > DRIFT_HISTORY_SIZE:
+            self._drift_history = self._drift_history[-DRIFT_HISTORY_SIZE:]
 
-    def _pick_catchup_speed(self, abs_drift):
-        """Choose a catch-up speed based on how far behind we are.
-
-        Uses a tiered approach with Kodi's supported tempo speeds:
-            tolerance -> mid-range:   1.2x
-            mid-range -> threshold:   speed_max (1.5x)
-        """
-        midpoint = (self._tolerance + self._hard_seek_threshold) / 2.0
-
-        if abs_drift < midpoint:
-            target = 1.2
-        else:
-            target = self._speed_max
-
-        return self._nearest_tempo(target)
-
-    @staticmethod
-    def _nearest_tempo(target):
-        """Snap to the nearest Kodi-supported tempo speed."""
-        return min(TEMPO_SPEEDS, key=lambda s: abs(s - target))
-
-    def _set_playback_speed(self, speed):
-        """Set playback speed using Kodi JSON-RPC tempo mode.
-
-        Tempo mode preserves audio pitch unlike regular FF/RW.
-        Kodi accepts decimal speed values via JSON-RPC and will
-        snap to the nearest supported tempo preset internally.
-        """
-        if speed == self._current_speed:
+        # Need enough readings before correcting
+        if len(self._drift_history) < 2:
             return
-        request = json.dumps({
-            "jsonrpc": "2.0",
-            "method": "Player.SetSpeed",
-            "params": {"playerid": 1, "speed": speed},
-            "id": 1
-        })
-        try:
-            response = xbmc.executeJSONRPC(request)
-            result = json.loads(response)
-            if "error" in result:
-                xbmc.log("[NuiSync] SetSpeed error: %s" %
-                         result["error"], xbmc.LOGWARNING)
-                return
-            # Read back actual speed Kodi applied
-            actual = result.get("result", {}).get("speed", speed)
-            self._current_speed = actual
-        except Exception as exc:
-            xbmc.log("[NuiSync] SetSpeed failed: %s" % exc,
-                     xbmc.LOGWARNING)
 
-    def _reset_speed(self):
-        """Reset playback speed to normal."""
-        if self._current_speed != 1.0:
-            self._set_playback_speed(1.0)
+        # Respect cooldown between corrections
+        if now - self._last_correction_time < CORRECTION_COOLDOWN:
+            return
+
+        # Check consistency: all readings must be in the same direction
+        # Mixed signs = network jitter, not real drift
+        signs = [d > 0 for _, d in self._drift_history]
+        if not (all(signs) or not any(signs)):
+            return
+
+        avg_drift = sum(d for _, d in self._drift_history) / len(
+            self._drift_history)
+        abs_avg = abs(avg_drift)
+
+        if abs_avg <= self._tolerance:
+            return  # within tolerance, nothing to do~
+
+        if avg_drift > 0:
+            # Client is BEHIND host -> seek forward
+            xbmc.log("[NuiSync] Behind by %.1fs, seeking to %.1f" %
+                     (abs_avg, adjusted_host_time), xbmc.LOGINFO)
+            self._seek_correction(adjusted_host_time)
+        else:
+            # Client is AHEAD of host
+            if abs_avg <= MICRO_PAUSE_MAX:
+                # Small lead: micro-pause to let host catch up
+                xbmc.log("[NuiSync] Ahead by %.1fs, micro-pausing~" %
+                         abs_avg, xbmc.LOGINFO)
+                self._micro_pause_correction(abs_avg)
+            else:
+                # Large lead: seek is less disruptive than a long pause
+                xbmc.log("[NuiSync] Ahead by %.1fs, seeking to %.1f" %
+                         (abs_avg, adjusted_host_time), xbmc.LOGINFO)
+                self._seek_correction(adjusted_host_time)
+
+    def _seek_correction(self, target_time):
+        """Seek to target position and reset drift tracking."""
+        self._suppress_for(1.0)
+        self.seekTime(target_time)
+        self._drift_history.clear()
+        self._last_correction_time = time.time()
+
+    def _micro_pause_correction(self, pause_duration):
+        """Briefly pause to let the host catch up, then auto-resume.
+
+        Runs in a background thread so the message handler isn't blocked.
+        """
+        if self._pause_correction_active:
+            return  # don't stack corrections
+        self._pause_correction_active = True
+
+        def _do_pause():
+            try:
+                self._suppress_for(pause_duration + 1.0)
+                self._ensure_paused()
+
+                # Wait in small increments so we can bail if playback stops
+                waited = 0.0
+                while waited < pause_duration:
+                    xbmc.sleep(200)
+                    waited += 0.2
+                    if not self.isPlaying():
+                        break
+
+                self._ensure_playing()
+                self._drift_history.clear()
+                self._last_correction_time = time.time()
+            finally:
+                self._pause_correction_active = False
+
+        t = threading.Thread(target=_do_pause, name="NuiSyncMicroPause")
+        t.daemon = True
+        t.start()
 
     # ==================================================================
     #  Sync heartbeat (HOST ONLY -- sends position to client)
@@ -411,6 +429,7 @@ class NuiSyncPlayer(xbmc.Player):
                  "paused=%s" % (url[:60], t, paused), xbmc.LOGINFO)
 
         self._suppress_for(1.0)
+        self._drift_history.clear()
 
         if not self.isPlaying() or self._current_url() != url:
             try:
@@ -426,8 +445,6 @@ class NuiSyncPlayer(xbmc.Player):
         if paused:
             xbmc.sleep(500)
             self._ensure_paused()
-
-        self._reset_speed()
 
     # ==================================================================
     #  Helpers
@@ -475,6 +492,6 @@ class NuiSyncPlayer(xbmc.Player):
             self.pause()
 
     def cleanup(self):
-        """Stop sync, reset speed."""
+        """Stop sync, clean up drift state."""
         self._stop_sync()
-        self._reset_speed()
+        self._drift_history.clear()

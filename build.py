@@ -2,17 +2,23 @@
 build.py — Package NuiSync for Kodi repo distribution.
 
 Run this script to generate:
-    repo/plugin.video.nuisync/plugin.video.nuisync-1.0.0.zip
-    repo/repository.nuisync/repository.nuisync-1.0.0.zip
+    repo/plugin.video.nuisync/plugin.video.nuisync-<ver>.zip  (for repo auto-updates)
+    repo/repository.nuisync/repository.nuisync-<ver>.zip      (for repo auto-updates)
+    repo/repository.nuisync-<ver>.zip                          (for Kodi "Install from zip")
+    repo/addons.xml
     repo/addons.xml.md5
+    repo/index.html
 
-Then push the repo/ folder to your GitHub and users can install
-via "Install from zip" or add the repo source URL.
+Then push to GitHub and users can install via:
+    Settings > File Manager > Add source >
+    https://swiftakira.github.io/nuisync-kodi/repo/
 """
 
 import hashlib
 import os
+import shutil
 import zipfile
+import xml.etree.ElementTree as ET
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.join(BASE_DIR, "repo")
@@ -20,15 +26,19 @@ REPO_DIR = os.path.join(BASE_DIR, "repo")
 ADDONS = [
     {
         "id": "plugin.video.nuisync",
-        "version": "1.0.0",
         "source": os.path.join(BASE_DIR, "plugin.video.nuisync"),
     },
     {
         "id": "repository.nuisync",
-        "version": "1.0.0",
         "source": os.path.join(BASE_DIR, "repository.nuisync"),
     },
 ]
+
+
+def _read_version(source_dir):
+    """Read version from addon.xml."""
+    tree = ET.parse(os.path.join(source_dir, "addon.xml"))
+    return tree.getroot().get("version")
 
 
 def build_zip(addon_id, version, source_dir):
@@ -40,14 +50,11 @@ def build_zip(addon_id, version, source_dir):
     zip_path = os.path.join(out_dir, zip_name)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add explicit directory entries (Kodi needs these)
         dirs_added = set()
         for root, dirs, files in os.walk(source_dir):
-            # Skip __pycache__ and hidden dirs
             dirs[:] = [d for d in dirs
                        if not d.startswith(".") and d != "__pycache__"]
 
-            # Add directory entry
             rel = os.path.relpath(root, source_dir)
             if rel == ".":
                 dir_arc = addon_id + "/"
@@ -63,12 +70,28 @@ def build_zip(addon_id, version, source_dir):
                 full = os.path.join(root, f)
                 arc = os.path.join(addon_id,
                                    os.path.relpath(full, source_dir))
-                # Normalize to forward slashes for zip
                 arc = arc.replace("\\", "/")
                 zf.write(full, arc)
 
     print("  -> %s" % zip_path)
     return zip_path
+
+
+def build_addons_xml():
+    """Generate addons.xml from each addon's addon.xml."""
+    xml_parts = ['<?xml version="1.0" encoding="UTF-8"?>\n<addons>']
+    for addon in ADDONS:
+        addon_xml = os.path.join(addon["source"], "addon.xml")
+        tree = ET.parse(addon_xml)
+        root = tree.getroot()
+        xml_parts.append("  " + ET.tostring(root, encoding="unicode"))
+    xml_parts.append("</addons>\n")
+    content = "\n".join(xml_parts)
+
+    xml_path = os.path.join(REPO_DIR, "addons.xml")
+    with open(xml_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("  -> %s" % xml_path)
 
 
 def build_md5():
@@ -82,17 +105,48 @@ def build_md5():
     print("  -> %s (%s)" % (md5_path, md5))
 
 
+def build_index(zip_names):
+    """Generate repo/index.html with direct links Kodi can browse."""
+    lines = ["<html><body>"]
+    for name in zip_names:
+        lines.append('<a href="%s">%s</a><br/>' % (name, name))
+    lines.append("</body></html>")
+
+    path = os.path.join(REPO_DIR, "index.html")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print("  -> %s" % path)
+
+
 def main():
     print("Building NuiSync Kodi repo~\n")
 
+    root_zips = []
     for addon in ADDONS:
-        print("Packaging %s v%s..." % (addon["id"], addon["version"]))
-        build_zip(addon["id"], addon["version"], addon["source"])
+        version = _read_version(addon["source"])
+        addon_id = addon["id"]
+        print("Packaging %s v%s..." % (addon_id, version))
+
+        # Build zip in subdirectory (for repository auto-update downloads)
+        zip_path = build_zip(addon_id, version, addon["source"])
+
+        # Copy zip to repo root (for Kodi "Install from zip" browsing)
+        zip_name = os.path.basename(zip_path)
+        root_copy = os.path.join(REPO_DIR, zip_name)
+        shutil.copy2(zip_path, root_copy)
+        print("  -> %s (browsable copy)" % root_copy)
+        root_zips.append(zip_name)
+
+    print("\nGenerating addons.xml...")
+    build_addons_xml()
 
     print("\nGenerating addons.xml.md5...")
     build_md5()
 
-    print("\nDone! Push the repo/ folder to GitHub.")
+    print("\nGenerating index.html...")
+    build_index(root_zips)
+
+    print("\nDone! Push to GitHub.")
     print("Users install via: Settings > File Manager > Add source >")
     print("  https://swiftakira.github.io/nuisync-kodi/repo/")
 
