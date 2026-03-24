@@ -16,6 +16,7 @@ Then push to GitHub and users can install via:
 
 import hashlib
 import os
+import re
 import shutil
 import zipfile
 import xml.etree.ElementTree as ET
@@ -78,15 +79,22 @@ def build_zip(addon_id, version, source_dir):
 
 
 def build_addons_xml():
-    """Generate addons.xml from each addon's addon.xml."""
+    """Generate addons.xml by concatenating raw addon.xml files.
+
+    Uses raw text concatenation (not ElementTree serialization) to
+    preserve the exact XML that Kodi expects. This is the standard
+    approach used by Kodi repo generators.
+    """
     xml_parts = ['<?xml version="1.0" encoding="UTF-8"?>\n<addons>']
     for addon in ADDONS:
         addon_xml = os.path.join(addon["source"], "addon.xml")
-        tree = ET.parse(addon_xml)
-        root = tree.getroot()
-        xml_parts.append("  " + ET.tostring(root, encoding="unicode"))
-    xml_parts.append("</addons>\n")
-    content = "\n".join(xml_parts)
+        with open(addon_xml, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        # Strip the XML declaration if present
+        raw = re.sub(r'<\?xml[^?]*\?>\s*', '', raw)
+        xml_parts.append(raw)
+    xml_parts.append('</addons>')
+    content = "\n".join(xml_parts) + "\n"
 
     xml_path = os.path.join(REPO_DIR, "addons.xml")
     with open(xml_path, "w", encoding="utf-8") as f:
