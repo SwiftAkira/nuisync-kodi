@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<settings version="2">
+  <section id="connection">
+    <category id="general" label="General">
+      <group id="1">
+        <setting id="enabled" type="boolean" label="Enabled" default="true"/>
+      </group>
+    </category>
+  </section>
+</settings>
