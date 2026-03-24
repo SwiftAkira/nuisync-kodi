@@ -40,16 +40,31 @@ def build_zip(addon_id, version, source_dir):
     zip_path = os.path.join(out_dir, zip_name)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Add explicit directory entries (Kodi needs these)
+        dirs_added = set()
         for root, dirs, files in os.walk(source_dir):
             # Skip __pycache__ and hidden dirs
             dirs[:] = [d for d in dirs
                        if not d.startswith(".") and d != "__pycache__"]
+
+            # Add directory entry
+            rel = os.path.relpath(root, source_dir)
+            if rel == ".":
+                dir_arc = addon_id + "/"
+            else:
+                dir_arc = addon_id + "/" + rel.replace("\\", "/") + "/"
+            if dir_arc not in dirs_added:
+                zf.mkdir(dir_arc)
+                dirs_added.add(dir_arc)
+
             for f in files:
                 if f.startswith(".") or f.endswith(".pyc"):
                     continue
                 full = os.path.join(root, f)
                 arc = os.path.join(addon_id,
                                    os.path.relpath(full, source_dir))
+                # Normalize to forward slashes for zip
+                arc = arc.replace("\\", "/")
                 zf.write(full, arc)
 
     print("  -> %s" % zip_path)
