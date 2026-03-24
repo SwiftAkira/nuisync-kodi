@@ -79,7 +79,7 @@ def main():
 
     print("\nDone! Push the repo/ folder to GitHub.")
     print("Users install via: Settings > File Manager > Add source >")
-    print("  https://raw.githubusercontent.com/SwiftAkira/nuisync-kodi/main/repo/")
+    print("  https://swiftakira.github.io/nuisync-kodi/repo/")
 
 
 if __name__ == "__main__":
