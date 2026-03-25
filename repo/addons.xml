@@ -2,7 +2,7 @@
 <addons>
 <addon id="plugin.video.nuisync"
        name="NuiSync"
-       version="1.1.5"
+       version="2.0.0"
        provider-name="NuiSync">
   <requires>
     <import addon="xbmc.python" version="3.0.0"/>
@@ -15,7 +15,7 @@
              library="service.py"/>
   <extension point="xbmc.addon.metadata">
     <summary lang="en">Sync Kodi playback with a friend~ no Hamachi needed</summary>
-    <description lang="en">NuiSync lets you watch together in perfect harmony! Host or join a cozy watch session to sync play, pause, seek, and stop between two Kodi instances. Share a short session code — no Hamachi, no port forwarding, no server hosting required. Auto-connects via UPnP with STUN-based session codes. Falls back to direct IP for Hamachi/LAN. Pure Python sockets, no extra dependencies~ Works beautifully with Fen Light, Cocoscrapers, and TorBox.</description>
+    <description lang="en">NuiSync lets you watch together in perfect harmony! Host or join a cozy watch session to sync play, pause, seek, and stop between two Kodi instances. Share a short session code — no Hamachi, no port forwarding needed. Connects via a lightweight cloud relay that works through any NAT or firewall. Falls back to direct IP for LAN. Pure Python, no extra dependencies~ Works beautifully with Fen Light, Cocoscrapers, and TorBox.</description>
     <platform>all</platform>
     <license>MIT</license>
     <assets>

@@ -1,17 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <settings>
   <category label="Connection">
-    <setting id="use_upnp"
-             type="bool"
-             label="Auto-open port (UPnP)"
-             default="true"/>
     <setting id="port"
              type="number"
-             label="Port"
+             label="Direct IP Port"
              default="9876"/>
     <setting id="hamachi_ip"
              type="text"
-             label="Direct IP (Hamachi/LAN fallback)"
+             label="Direct IP (LAN/Hamachi fallback)"
              default="25.0.0.1"/>
     <setting id="auto_reconnect"
              type="bool"
