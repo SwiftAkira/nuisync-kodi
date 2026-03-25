@@ -138,6 +138,26 @@ def main():
         # Build zip in subdirectory (for repository auto-update downloads)
         zip_path = build_zip(addon_id, version, addon["source"])
 
+        # Copy addon.xml alongside the zip (Kodi reads this for metadata)
+        src_addon_xml = os.path.join(addon["source"], "addon.xml")
+        dst_addon_xml = os.path.join(REPO_DIR, addon_id, "addon.xml")
+        shutil.copy2(src_addon_xml, dst_addon_xml)
+        print("  -> %s (metadata)" % dst_addon_xml)
+
+        # Copy icon.png if it exists (Kodi shows this when browsing repo)
+        src_icon = os.path.join(addon["source"], "icon.png")
+        if os.path.exists(src_icon):
+            dst_icon = os.path.join(REPO_DIR, addon_id, "icon.png")
+            shutil.copy2(src_icon, dst_icon)
+            print("  -> %s (icon)" % dst_icon)
+
+        # Copy fanart.jpg if it exists
+        src_fanart = os.path.join(addon["source"], "fanart.jpg")
+        if os.path.exists(src_fanart):
+            dst_fanart = os.path.join(REPO_DIR, addon_id, "fanart.jpg")
+            shutil.copy2(src_fanart, dst_fanart)
+            print("  -> %s (fanart)" % dst_fanart)
+
         # Copy zip to repo root (for Kodi "Install from zip" browsing)
         zip_name = os.path.basename(zip_path)
         root_copy = os.path.join(REPO_DIR, zip_name)
