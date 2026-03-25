@@ -7,18 +7,17 @@ default.py to know when the user wants to host/join/disconnect.
 Manages:
     - NuiSyncNetwork (socket connection + reconnection + NAT traversal)
     - NuiSyncPlayer  (playback event hooks, host-authority model)
-    - On-screen status overlay (subtitle-area transparent WindowDialog)
 
 Connection modes:
     - "host"      → UPnP auto-forward + session code + TCP listen
     - "join_code" → decode session code → TCP connect
     - "join"      → direct IP connect (legacy Hamachi / LAN fallback)
 
-Toggle overlay via the addon menu or with:
-    RunScript(plugin.video.nuisync,toggle_overlay)
+Uses Kodi's built-in notification system for status messages instead
+of a persistent WindowDialog — avoids crash on addon uninstall when
+Kodi's CPythonInvoker force-kills the interpreter while GUI objects
+are still alive.
 """
-
-import threading
 
 import xbmc
 import xbmcgui
@@ -29,108 +28,6 @@ from network import NuiSyncNetwork, STATE_CONNECTED, STATE_RECONNECTING, \
 from player import NuiSyncPlayer
 
 ADDON = xbmcaddon.Addon("plugin.video.nuisync")
-
-# Overlay auto-hide delay in seconds
-OVERLAY_AUTO_HIDE = 5
-
-
-# ======================================================================
-#  On-screen status overlay — subtitle-area transparent window
-# ======================================================================
-
-class StatusOverlay(xbmcgui.WindowDialog):
-    """Transparent floating overlay in the subtitle area~
-
-    Uses xbmcgui.WindowDialog -- borderless, transparent, floats above
-    all Kodi screens including fullscreen video.
-
-    Position: bottom-center, roughly where subtitles appear on 1080p.
-    """
-
-    LABEL_WIDTH = 600
-    LABEL_HEIGHT = 40
-    LABEL_X = (1920 - 600) // 2   # 660, centered
-    LABEL_Y = 920                  # subtitle zone
-
-    def __init__(self):
-        super(StatusOverlay, self).__init__()
-
-        # Semi-transparent dark background for readability
-        self._bg = xbmcgui.ControlImage(
-            x=self.LABEL_X - 10,
-            y=self.LABEL_Y - 5,
-            width=self.LABEL_WIDTH + 20,
-            height=self.LABEL_HEIGHT + 10,
-            filename="",
-            colorDiffuse="99000000",
-        )
-
-        self._label = xbmcgui.ControlLabel(
-            x=self.LABEL_X,
-            y=self.LABEL_Y,
-            width=self.LABEL_WIDTH,
-            height=self.LABEL_HEIGHT,
-            label="",
-            font="font13",
-            textColor="0xFFFF99CC",   # soft pink~
-            alignment=0x00000002 | 0x00000004,
-        )
-
-        self.addControls([self._bg, self._label])
-
-        self._visible = False
-        self._last_text = ""
-        self._auto_hide_timer = None
-        self._lock = threading.Lock()
-
-    def update(self, text, auto_hide=True):
-        """Update text and show the overlay~"""
-        with self._lock:
-            self._last_text = text
-            self._label.setLabel("NuiSync: %s" % text)
-
-            if not self._visible:
-                self.show()
-                self._visible = True
-
-            if self._auto_hide_timer:
-                self._auto_hide_timer.cancel()
-                self._auto_hide_timer = None
-
-            if auto_hide and OVERLAY_AUTO_HIDE > 0:
-                self._auto_hide_timer = threading.Timer(
-                    OVERLAY_AUTO_HIDE, self._do_hide)
-                self._auto_hide_timer.daemon = True
-                self._auto_hide_timer.start()
-
-    def toggle(self):
-        """Toggle visibility."""
-        with self._lock:
-            if self._visible:
-                self._do_hide()
-            elif self._last_text:
-                self._label.setLabel("NuiSync: %s" % self._last_text)
-                self.show()
-                self._visible = True
-
-    def _do_hide(self):
-        try:
-            self.close()
-        except RuntimeError:
-            pass
-        self._visible = False
-
-    def dismiss(self):
-        with self._lock:
-            if self._auto_hide_timer:
-                self._auto_hide_timer.cancel()
-                self._auto_hide_timer = None
-            self._do_hide()
-            self._last_text = ""
-
-    @property
-    def last_text(self):
-        return self._last_text
 
 
 # ======================================================================
@@ -155,28 +52,32 @@ def _get_setting(key, default, cast=float):
 def run_service():
     monitor = xbmc.Monitor()
     win = xbmcgui.Window(10000)
-    overlay = StatusOverlay()
 
     network = None
     player = None
     session_active = False
+
+    def _notify(text, time_ms=4000, icon=xbmcgui.NOTIFICATION_INFO):
+        """Show a Kodi notification — no persistent GUI objects."""
+        try:
+            xbmcgui.Dialog().notification("NuiSync", text, icon, time_ms)
+        except RuntimeError:
+            pass
 
     def on_message(msg):
         """Forward non-transport messages to the player."""
         if player:
             player.handle_remote(msg)
 
-        # Show peer buffering state on overlay
         if msg.get("cmd") == "buffering":
             if msg.get("state"):
-                overlay.update("Friend is buffering~", auto_hide=False)
+                _notify("Friend is buffering~")
             else:
-                overlay.update("In sync~", auto_hide=True)
+                _notify("In sync~")
 
     def on_status(text):
         xbmc.log("[NuiSync] Status: %s" % text, xbmc.LOGINFO)
-        auto_hide = "Reconnecting" not in text and "Code:" not in text
-        overlay.update(text, auto_hide=auto_hide)
+        _notify(text)
 
     def _make_network():
         """Create a NuiSyncNetwork with current settings."""
@@ -211,15 +112,10 @@ def run_service():
         network = _make_network()
         player = _make_player(network, is_host=True)
 
-        # Check if default.py already discovered a session code
-        pre_code = win.getProperty("nuisync.session_code_host")
         win.clearProperty("nuisync.session_code_host")
 
         def _host():
             nonlocal session_active
-            # Host with UPnP — the code was already shown to the user
-            # in default.py, so network.host() will regenerate it
-            # (cheap STUN call) and use it for the overlay
             success = network.host(port, use_upnp=use_upnp)
             if success:
                 session_active = True
@@ -229,8 +125,8 @@ def run_service():
                 on_status("Host cancelled")
                 cleanup()
 
+        import threading
         t = threading.Thread(target=_host, name="NuiSyncHost")
-        t.daemon = True
         t.start()
 
     def start_join_code():
@@ -284,22 +180,12 @@ def run_service():
         session_active = False
         win.setProperty("nuisync.active", "")
         win.clearProperty("nuisync.session_code")
-        overlay.dismiss()
 
     # ----- Main loop -----
     xbmc.log("[NuiSync] Service started~", xbmc.LOGINFO)
 
-    ADDON_ENABLED_CHECK = "System.AddonIsEnabled(plugin.video.nuisync)"
-
     try:
         while not monitor.abortRequested():
-            # Detect addon uninstall/disable — waitForAbort does NOT
-            # fire on addon-level stop, only on full Kodi shutdown.
-            if not xbmc.getCondVisibility(ADDON_ENABLED_CHECK):
-                xbmc.log("[NuiSync] Addon disabled, exiting~",
-                         xbmc.LOGINFO)
-                break
-
             # Check for role commands from the plugin UI
             role = win.getProperty("nuisync.role")
             if role:
@@ -316,42 +202,24 @@ def run_service():
                     start_join()
                 elif role == "disconnect":
                     cleanup()
-                    overlay.update("See you next time~", auto_hide=True)
-
-            # Check for overlay toggle
-            toggle = win.getProperty("nuisync.toggle_overlay")
-            if toggle:
-                win.clearProperty("nuisync.toggle_overlay")
-                overlay.toggle()
+                    _notify("See you next time~")
 
             # Monitor connection state
             if session_active and network:
                 state = network.state
                 if state == STATE_DISCONNECTED:
-                    xbmcgui.Dialog().notification(
-                        "NuiSync", "Friend disconnected~",
-                        xbmcgui.NOTIFICATION_WARNING, 3000)
+                    _notify("Friend disconnected~", icon=xbmcgui.NOTIFICATION_WARNING)
                     cleanup()
 
             if monitor.waitForAbort(0.5):
                 break
-    except Exception as exc:
-        xbmc.log("[NuiSync] Service exception: %s" % exc, xbmc.LOGWARNING)
+    except Exception:
+        pass
 
-    # Clean up network/player
     try:
         cleanup()
     except Exception:
         pass
-
-    # Explicitly destroy the overlay window — if it survives into
-    # interpreter teardown, Kodi crashes when freeing GUI objects.
-    try:
-        overlay.dismiss()
-        del overlay
-    except Exception:
-        pass
-
     xbmc.log("[NuiSync] Service stopped", xbmc.LOGINFO)
 
 

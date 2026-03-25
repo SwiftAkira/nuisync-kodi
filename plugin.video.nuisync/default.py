@@ -40,23 +40,15 @@ def _get_setting(key, default, cast=float):
 def main():
     win = xbmcgui.Window(10000)
 
-    # ---- Handle RunScript argument (for keymap / favourites) ----
-    if len(sys.argv) > 1 and sys.argv[1] == "toggle_overlay":
-        win.setProperty("nuisync.toggle_overlay", "true")
-        return
-
     is_active = win.getProperty("nuisync.active") == "true"
 
     # ---- Active session menu ----
     if is_active:
         options = [
-            "Show / Hide Overlay~",
             "Disconnect",
         ]
         choice = xbmcgui.Dialog().select(ADDON_NAME, options)
         if choice == 0:
-            win.setProperty("nuisync.toggle_overlay", "true")
-        elif choice == 1:
             win.setProperty("nuisync.role", "disconnect")
         return
 
