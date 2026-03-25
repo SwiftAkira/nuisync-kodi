@@ -125,11 +125,21 @@ def _do_host():
 
     # Show the session code (or instructions) in a dialog
     if session_code:
+        # Copy to clipboard
+        import subprocess
+        try:
+            proc = subprocess.Popen(
+                ["clip.exe"] if sys.platform == "win32" else ["xclip", "-selection", "clipboard"],
+                stdin=subprocess.PIPE)
+            proc.communicate(session_code.encode("utf-8"))
+        except Exception:
+            pass  # clipboard not available, no big deal
+
         # Store the code so service.py can reuse it
         win.setProperty("nuisync.session_code_host", session_code)
         dialog.ok(
             ADDON_NAME,
-            "Your Session Code:\n\n"
+            "Your Session Code (copied to clipboard):\n\n"
             "[B]%s[/B]\n\n"
             "Share this code with your friend!\n"
             "They select 'Join with Session Code' and enter it.\n"
