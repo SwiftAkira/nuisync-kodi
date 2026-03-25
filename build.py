@@ -97,19 +97,29 @@ def build_addons_xml():
     content = "\n".join(xml_parts) + "\n"
 
     xml_path = os.path.join(REPO_DIR, "addons.xml")
-    with open(xml_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    # Force LF line endings -- GitHub Pages serves LF regardless of
+    # what's committed, so the MD5 must match the LF version.
+    content = content.replace("\r\n", "\n")
+    with open(xml_path, "wb") as f:
+        f.write(content.encode("utf-8"))
     print("  -> %s" % xml_path)
 
 
 def build_md5():
-    """Generate addons.xml.md5 checksum file."""
+    """Generate addons.xml.md5 checksum file.
+
+    Reads the file as-is (should be LF from build_addons_xml) and
+    computes the MD5 that Kodi will see after downloading from GitHub.
+    """
     xml_path = os.path.join(REPO_DIR, "addons.xml")
     with open(xml_path, "rb") as f:
-        md5 = hashlib.md5(f.read()).hexdigest()
+        raw = f.read()
+    # Safety: strip any stray CR in case git auto-crlf touched it
+    raw = raw.replace(b"\r\n", b"\n")
+    md5 = hashlib.md5(raw).hexdigest()
     md5_path = xml_path + ".md5"
-    with open(md5_path, "w") as f:
-        f.write(md5)
+    with open(md5_path, "wb") as f:
+        f.write(md5.encode("utf-8"))
     print("  -> %s (%s)" % (md5_path, md5))
 
 
