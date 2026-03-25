@@ -289,8 +289,17 @@ def run_service():
     # ----- Main loop -----
     xbmc.log("[NuiSync] Service started~", xbmc.LOGINFO)
 
+    ADDON_ENABLED_CHECK = "System.AddonIsEnabled(plugin.video.nuisync)"
+
     try:
         while not monitor.abortRequested():
+            # Detect addon uninstall/disable — waitForAbort does NOT
+            # fire on addon-level stop, only on full Kodi shutdown.
+            if not xbmc.getCondVisibility(ADDON_ENABLED_CHECK):
+                xbmc.log("[NuiSync] Addon disabled, exiting~",
+                         xbmc.LOGINFO)
+                break
+
             # Check for role commands from the plugin UI
             role = win.getProperty("nuisync.role")
             if role:
@@ -327,13 +336,22 @@ def run_service():
             if monitor.waitForAbort(0.5):
                 break
     except Exception as exc:
-        # Catch-all so uninstalling the addon mid-run doesn't crash Kodi
         xbmc.log("[NuiSync] Service exception: %s" % exc, xbmc.LOGWARNING)
 
+    # Clean up network/player
     try:
         cleanup()
     except Exception:
         pass
+
+    # Explicitly destroy the overlay window — if it survives into
+    # interpreter teardown, Kodi crashes when freeing GUI objects.
+    try:
+        overlay.dismiss()
+        del overlay
+    except Exception:
+        pass
+
     xbmc.log("[NuiSync] Service stopped", xbmc.LOGINFO)
 
 
