@@ -72,9 +72,12 @@ class NuiSyncPlayer(xbmc.Player):
         self._suppress_lock = threading.Lock()
         self._suppress_until = 0.0
 
-        # Buffering awareness
+        # Buffering sync — pause everyone when someone buffers
         self._is_buffering = False
         self._peer_buffering = False
+        self._paused_for_buffering = False  # we paused playback due to peer buffering
+        self._buffering_check_thread = None
+        self._buffering_check_running = False
 
         # Sync heartbeat thread (host only)
         self._sync_thread = None
@@ -106,6 +109,7 @@ class NuiSyncPlayer(xbmc.Player):
     def onAVStarted(self):
         """Fires after stream is resolved and buffering is done.
         Reliable for Fen Light + TorBox resolved streams~"""
+        self._start_buffering_check()
         if self._is_suppressed() or not self._is_host:
             return
         url = self._current_url()
@@ -158,12 +162,21 @@ class NuiSyncPlayer(xbmc.Player):
         """
         cmd = msg.get("cmd", "")
 
+        # -- Both sides handle buffering and reactions --
+        if cmd == "buffering":
+            self._handle_peer_buffering(msg.get("state", False))
+            return
+        if cmd == "reaction":
+            emoji = msg.get("emoji", "")
+            if emoji:
+                xbmcgui.Dialog().notification(
+                    "NuiSync", emoji, xbmcgui.NOTIFICATION_INFO, 3000)
+            return
+
         # -- Host: respond to state_request, ignore everything else --
         if self._is_host:
             if cmd == "state_request":
                 self._send_state_response()
-            elif cmd == "buffering":
-                self._peer_buffering = msg.get("state", False)
             return
 
         # -- Client: apply commands from the host --
@@ -491,7 +504,75 @@ class NuiSyncPlayer(xbmc.Player):
         if xbmc.getCondVisibility("Player.Paused"):
             self.pause()
 
+    # ==================================================================
+    #  Buffering sync — pause for peer, resume when both ready
+    # ==================================================================
+
+    def _start_buffering_check(self):
+        """Start a thread that monitors Player.Caching and tells the peer."""
+        if self._buffering_check_running:
+            return
+        self._buffering_check_running = True
+        self._buffering_check_thread = threading.Thread(
+            target=self._buffering_check_loop, name="NuiSyncBuffCheck")
+        self._buffering_check_thread.start()
+
+    def _buffering_check_loop(self):
+        monitor = xbmc.Monitor()
+        while (self._buffering_check_running
+               and self._net.connected
+               and not monitor.abortRequested()):
+            is_buf = xbmc.getCondVisibility("Player.Caching")
+            if is_buf != self._is_buffering:
+                self._is_buffering = is_buf
+                self._net.send({"cmd": "buffering", "state": is_buf})
+                if is_buf:
+                    xbmc.log("[NuiSync] I'm buffering", xbmc.LOGINFO)
+                else:
+                    xbmc.log("[NuiSync] Done buffering", xbmc.LOGINFO)
+            if not self.isPlaying():
+                break
+            if monitor.waitForAbort(0.5):
+                break
+        self._buffering_check_running = False
+
+    def _handle_peer_buffering(self, is_buffering):
+        """Peer started or stopped buffering — pause/resume accordingly."""
+        self._peer_buffering = is_buffering
+        if not self.isPlaying():
+            return
+
+        if is_buffering and not self._paused_for_buffering:
+            # Peer is buffering — pause so they don't fall behind
+            paused = xbmc.getCondVisibility("Player.Paused")
+            if not paused:
+                xbmc.log("[NuiSync] Pausing for peer buffering", xbmc.LOGINFO)
+                self._suppress_for(1.0)
+                self._paused_for_buffering = True
+                self.pause()
+        elif not is_buffering and self._paused_for_buffering:
+            # Peer done buffering — resume
+            paused = xbmc.getCondVisibility("Player.Paused")
+            if paused:
+                xbmc.log("[NuiSync] Resuming after peer buffering",
+                         xbmc.LOGINFO)
+                self._suppress_for(1.0)
+                self.pause()  # toggles back to play
+            self._paused_for_buffering = False
+
+    # ==================================================================
+    #  Reactions
+    # ==================================================================
+
+    def send_reaction(self, emoji):
+        """Send a reaction emoji to the peer."""
+        self._net.send({"cmd": "reaction", "emoji": emoji})
+        # Show locally too
+        xbmcgui.Dialog().notification("NuiSync", emoji,
+                                      xbmcgui.NOTIFICATION_INFO, 3000)
+
     def cleanup(self):
         """Stop sync, clean up drift state."""
         self._stop_sync()
+        self._buffering_check_running = False
         self._drift_history.clear()

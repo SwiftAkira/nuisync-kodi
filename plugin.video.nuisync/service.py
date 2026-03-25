@@ -51,11 +51,6 @@ def run_service():
     def on_message(msg):
         if player:
             player.handle_remote(msg)
-        if msg.get("cmd") == "buffering":
-            if msg.get("state"):
-                _notify("Friend is buffering~")
-            else:
-                _notify("In sync~")
 
     def on_status(text):
         xbmc.log("[NuiSync] Status: %s" % text, xbmc.LOGINFO)
@@ -173,6 +168,13 @@ def run_service():
                 elif role == "disconnect":
                     cleanup()
                     _notify("See you next time~")
+
+            # Check for reaction
+            if session_active and player:
+                reaction = win.getProperty("nuisync.reaction")
+                if reaction:
+                    win.clearProperty("nuisync.reaction")
+                    player.send_reaction(reaction)
 
             if session_active and network:
                 if network.state == STATE_DISCONNECTED:

@@ -2,7 +2,7 @@
 <addons>
 <addon id="plugin.video.nuisync"
        name="NuiSync"
-       version="2.0.1"
+       version="2.1.0"
        provider-name="NuiSync">
   <requires>
     <import addon="xbmc.python" version="3.0.0"/>

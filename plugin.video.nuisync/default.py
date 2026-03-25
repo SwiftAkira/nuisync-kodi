@@ -25,8 +25,14 @@ def main():
     is_active = win.getProperty("nuisync.active") == "true"
 
     if is_active:
-        choice = xbmcgui.Dialog().select(ADDON_NAME, ["Disconnect"])
+        options = [
+            "Send Reaction~",
+            "Disconnect",
+        ]
+        choice = xbmcgui.Dialog().select(ADDON_NAME, options)
         if choice == 0:
+            _do_reaction()
+        elif choice == 1:
             win.setProperty("nuisync.role", "disconnect")
         return
 
@@ -102,6 +108,27 @@ def _do_join_direct():
     ADDON.setSetting("hamachi_ip", ip)
     win.setProperty("nuisync.host_ip", ip)
     win.setProperty("nuisync.role", "join_direct")
+
+
+REACTIONS = [
+    ("Haha", "\U0001f602"),
+    ("Wow", "\U0001f62e"),
+    ("Scared", "\U0001f631"),
+    ("Sad", "\U0001f622"),
+    ("Love it", "\u2764\ufe0f"),
+    ("Fire", "\U0001f525"),
+    ("Bored", "\U0001f634"),
+    ("BRB", "\U0001f6b6"),
+]
+
+
+def _do_reaction():
+    win = xbmcgui.Window(10000)
+    labels = ["%s %s" % (emoji, name) for name, emoji in REACTIONS]
+    choice = xbmcgui.Dialog().select("React~", labels)
+    if choice >= 0:
+        name, emoji = REACTIONS[choice]
+        win.setProperty("nuisync.reaction", emoji)
 
 
 if __name__ == "__main__":
