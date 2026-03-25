@@ -5,9 +5,14 @@ Runs for the entire Kodi session. Polls window properties set by
 default.py to know when the user wants to host/join/disconnect.
 
 Manages:
-    - NuiSyncNetwork (socket connection + reconnection)
+    - NuiSyncNetwork (socket connection + reconnection + NAT traversal)
     - NuiSyncPlayer  (playback event hooks, host-authority model)
     - On-screen status overlay (subtitle-area transparent WindowDialog)
+
+Connection modes:
+    - "host"      → UPnP auto-forward + session code + TCP listen
+    - "join_code" → decode session code → TCP connect
+    - "join"      → direct IP connect (legacy Hamachi / LAN fallback)
 
 Toggle overlay via the addon menu or with:
     RunScript(plugin.video.nuisync,toggle_overlay)
@@ -170,39 +175,55 @@ def run_service():
 
     def on_status(text):
         xbmc.log("[NuiSync] Status: %s" % text, xbmc.LOGINFO)
-        auto_hide = "Reconnecting" not in text
+        auto_hide = "Reconnecting" not in text and "Code:" not in text
         overlay.update(text, auto_hide=auto_hide)
 
-    def start_host():
-        nonlocal network, player, session_active
-        port = int(_get_setting("port", 9876, int))
-        tolerance = _get_setting("sync_tolerance", 2.0)
-        hard_seek = _get_setting("hard_seek_threshold", 15.0)
-        speed_max = _get_setting("speed_max", 1.5)
-        speed_min = _get_setting("speed_min", 0.8)
+    def _make_network():
+        """Create a NuiSyncNetwork with current settings."""
         auto_recon = ADDON.getSetting("auto_reconnect") != "false"
         recon_attempts = int(_get_setting("reconnect_attempts", 5, int))
         recon_delay = int(_get_setting("reconnect_delay", 3, int))
-
-        network = NuiSyncNetwork(
+        return NuiSyncNetwork(
             on_message, on_status,
             auto_reconnect=auto_recon,
             reconnect_attempts=recon_attempts,
             reconnect_delay=recon_delay,
         )
-        player = NuiSyncPlayer(
-            network, is_host=True,
+
+    def _make_player(net, is_host):
+        """Create a NuiSyncPlayer with current settings."""
+        tolerance = _get_setting("sync_tolerance", 2.0)
+        hard_seek = _get_setting("hard_seek_threshold", 15.0)
+        speed_max = _get_setting("speed_max", 1.5)
+        speed_min = _get_setting("speed_min", 0.8)
+        return NuiSyncPlayer(
+            net, is_host=is_host,
             desync_tolerance=tolerance,
             hard_seek_threshold=hard_seek,
             speed_max=speed_max, speed_min=speed_min,
         )
 
+    def start_host():
+        nonlocal network, player, session_active
+        port = int(_get_setting("port", 9876, int))
+        use_upnp = ADDON.getSetting("use_upnp") != "false"
+
+        network = _make_network()
+        player = _make_player(network, is_host=True)
+
         def _host():
             nonlocal session_active
-            success = network.host(port)
+            success = network.host(port, use_upnp=use_upnp)
             if success:
                 session_active = True
                 win.setProperty("nuisync.active", "true")
+                # Show session code in a dialog for easy sharing
+                code = network.session_code
+                if code:
+                    xbmcgui.Dialog().ok(
+                        "NuiSync",
+                        "Friend connected!\n"
+                        "Session code was: %s" % code)
             else:
                 on_status("Host cancelled")
                 cleanup()
@@ -211,30 +232,36 @@ def run_service():
         t.daemon = True
         t.start()
 
+    def start_join_code():
+        """Join via session code (NAT-traversal friendly)."""
+        nonlocal network, player, session_active
+        code = win.getProperty("nuisync.session_code")
+
+        network = _make_network()
+        player = _make_player(network, is_host=False)
+
+        on_status("Connecting via code~")
+        success = network.join_by_code(code)
+        if success:
+            session_active = True
+            win.setProperty("nuisync.active", "true")
+        else:
+            xbmcgui.Dialog().ok(
+                "NuiSync",
+                "Couldn't connect with code %s~\n\n"
+                "Make sure your friend is hosting and the code is "
+                "correct. If it still fails, try 'Join with Direct IP' "
+                "with Hamachi or a VPN." % code)
+            cleanup()
+
     def start_join():
+        """Join via direct IP (legacy / Hamachi fallback)."""
         nonlocal network, player, session_active
         ip = win.getProperty("nuisync.host_ip")
         port = int(_get_setting("port", 9876, int))
-        tolerance = _get_setting("sync_tolerance", 2.0)
-        hard_seek = _get_setting("hard_seek_threshold", 15.0)
-        speed_max = _get_setting("speed_max", 1.5)
-        speed_min = _get_setting("speed_min", 0.8)
-        auto_recon = ADDON.getSetting("auto_reconnect") != "false"
-        recon_attempts = int(_get_setting("reconnect_attempts", 5, int))
-        recon_delay = int(_get_setting("reconnect_delay", 3, int))
 
-        network = NuiSyncNetwork(
-            on_message, on_status,
-            auto_reconnect=auto_recon,
-            reconnect_attempts=recon_attempts,
-            reconnect_delay=recon_delay,
-        )
-        player = NuiSyncPlayer(
-            network, is_host=False,
-            desync_tolerance=tolerance,
-            hard_seek_threshold=hard_seek,
-            speed_max=speed_max, speed_min=speed_min,
-        )
+        network = _make_network()
+        player = _make_player(network, is_host=False)
 
         success = network.join(ip, port)
         if success:
@@ -255,6 +282,7 @@ def run_service():
             network = None
         session_active = False
         win.setProperty("nuisync.active", "")
+        win.clearProperty("nuisync.session_code")
         overlay.dismiss()
 
     # ----- Main loop -----
@@ -269,6 +297,9 @@ def run_service():
             if role == "host":
                 cleanup()
                 start_host()
+            elif role == "join_code":
+                cleanup()
+                start_join_code()
             elif role == "join":
                 cleanup()
                 start_join()

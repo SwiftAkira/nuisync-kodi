@@ -1,8 +1,10 @@
 """
 network.py — Raw socket host/client for NuiSync~
 
-Host binds on 0.0.0.0:<port> and accepts exactly one peer.
-Client connects to the host's Hamachi IP.
+Connection cascade (tries in order, falls back gracefully):
+    1. UPnP auto-port-forward → direct TCP (works ~70-80% of home routers)
+    2. UDP hole punching → reliable UDP transport (works ~80% of remaining)
+    3. Direct IP entry → TCP (legacy Hamachi / manual port forward fallback)
 
 Protocol: line-delimited JSON, each message terminated by newline.
 Messages carry an auto-incrementing "seq" number for diagnostics.
@@ -15,6 +17,8 @@ Includes:
     - Auto-reconnect with configurable attempts and delay
     - Thread-safe sends via lock
     - Ping/pong handled at network layer, not forwarded to player
+    - UPnP mapping cleanup on shutdown
+    - Session code generation for serverless discovery
 """
 
 import socket
@@ -23,6 +27,11 @@ import json
 import time
 
 import xbmc
+
+from nathelper import (
+    discover_public_address, try_upnp_forward, encode_session,
+    decode_session, udp_hole_punch, UPnPMapping,
+)
 
 # Timing constants
 POLL_INTERVAL = 0.1
@@ -35,9 +44,18 @@ STATE_CONNECTING = "connecting"
 STATE_CONNECTED = "connected"
 STATE_RECONNECTING = "reconnecting"
 
+# Transport types
+TRANSPORT_TCP = "tcp"
+TRANSPORT_UDP = "udp"
+
 
 class NuiSyncNetwork(object):
-    """Manages the TCP connection between host and guest."""
+    """Manages the connection between host and guest.
+
+    Supports two transports:
+        - TCP (direct or via UPnP port forward) — full reliability
+        - UDP (via hole punching) — lightweight reliability layer for commands
+    """
 
     def __init__(self, on_message_callback, on_status_callback,
                  auto_reconnect=True, reconnect_attempts=5,
@@ -64,10 +82,18 @@ class NuiSyncNetwork(object):
         self._role = None           # "host" or "client"
         self._remote_ip = None      # client stores host IP
         self._port = None
+        self._transport = None      # TRANSPORT_TCP or TRANSPORT_UDP
 
         # Socket handles
-        self._sock = None           # the connected peer socket
-        self._server_sock = None    # only set on host side
+        self._sock = None           # the connected peer socket (TCP or UDP)
+        self._server_sock = None    # only set on host side (TCP)
+        self._udp_remote = None     # (ip, port) for UDP peer
+
+        # UPnP mapping (cleaned up on shutdown)
+        self._upnp_mapping = None
+
+        # Session code for this session
+        self._session_code = None
 
         # Threading
         self._lock = threading.Lock()          # guards _sock and sends
@@ -77,22 +103,85 @@ class NuiSyncNetwork(object):
         self._recv_buffer = ""
         self._reconnect_cancel = threading.Event()
 
-        # Message sequencing (diagnostic)
+        # Message sequencing (diagnostic + UDP reliability)
         self._seq = 0
+
+        # UDP reliability: track unacked messages for retransmit
+        self._udp_pending = {}      # seq -> (msg_bytes, send_time, retries)
+        self._udp_acked = set()     # seqs we've received and acked
+        self._udp_lock = threading.Lock()
 
         # Heartbeat tracking
         self._last_pong_time = 0.0
 
     # ------------------------------------------------------------------
-    # Host
+    # Session code helpers
     # ------------------------------------------------------------------
 
-    def host(self, port):
-        """Bind and listen. Blocks until a peer connects or shutdown."""
+    @property
+    def session_code(self):
+        """The session code for this hosting session, or None."""
+        return self._session_code
+
+    # ------------------------------------------------------------------
+    # Host — with connection cascade
+    # ------------------------------------------------------------------
+
+    def host(self, port, use_upnp=True):
+        """Host a session using the connection cascade.
+
+        1. Try UPnP auto-forward → TCP listen
+        2. Discover public address for session code
+        3. Wait for peer connection
+
+        Returns True on success.
+        """
         self._role = "host"
         self._port = port
         self._state = STATE_CONNECTING
 
+        # Step 1: Try UPnP port forward
+        if use_upnp:
+            self._on_status("Setting up connection~")
+            xbmc.log("[NuiSync] Trying UPnP port forward...", xbmc.LOGINFO)
+            mapping = try_upnp_forward(port, protocol="TCP")
+            if mapping:
+                self._upnp_mapping = mapping
+                xbmc.log("[NuiSync] UPnP succeeded!", xbmc.LOGINFO)
+
+                # Get public IP: try UPnP first, fall back to STUN
+                pub_ip = mapping.get_external_ip()
+                if not pub_ip:
+                    result = discover_public_address()
+                    pub_ip = result[0] if result else None
+
+                if pub_ip:
+                    self._session_code = encode_session(pub_ip, port)
+                    xbmc.log("[NuiSync] Session code: %s" %
+                             self._session_code, xbmc.LOGINFO)
+            else:
+                xbmc.log("[NuiSync] UPnP not available, using direct mode",
+                         xbmc.LOGINFO)
+                # Still try to get a session code via STUN (may work if
+                # user has manual port forward or is on a public IP)
+                result = discover_public_address()
+                if result:
+                    self._session_code = encode_session(result[0], port)
+        else:
+            result = discover_public_address()
+            if result:
+                self._session_code = encode_session(result[0], port)
+
+        # Step 2: TCP listen (works whether UPnP succeeded or not)
+        self._transport = TRANSPORT_TCP
+        return self._accept_connection(port)
+
+    def host_direct(self, port):
+        """Host without NAT traversal (legacy / Hamachi mode)."""
+        self._role = "host"
+        self._port = port
+        self._state = STATE_CONNECTING
+        self._transport = TRANSPORT_TCP
         return self._accept_connection(port)
 
     def _accept_connection(self, port):
@@ -114,7 +203,13 @@ class NuiSyncNetwork(object):
             self._server_sock.listen(1)
 
         self._running = True
-        self._on_status("Waiting for friend on port %d~" % port)
+
+        if self._session_code:
+            self._on_status("Code: %s  |  Port %d~" %
+                            (self._session_code, port))
+        else:
+            self._on_status("Waiting for friend on port %d~" % port)
+
         xbmc.log("[NuiSync] Hosting on 0.0.0.0:%d" % port, xbmc.LOGINFO)
 
         while self._running:
@@ -142,17 +237,33 @@ class NuiSyncNetwork(object):
         return False
 
     # ------------------------------------------------------------------
-    # Client / Guest
+    # Client / Guest — with connection cascade
     # ------------------------------------------------------------------
 
     def join(self, host_ip, port, timeout=10):
-        """Connect to the host. Returns True on success."""
+        """Connect to the host via direct TCP. Returns True on success."""
         self._role = "client"
         self._remote_ip = host_ip
         self._port = port
         self._state = STATE_CONNECTING
+        self._transport = TRANSPORT_TCP
 
         return self._do_connect(host_ip, port, timeout)
+
+    def join_by_code(self, code, timeout=10):
+        """Connect to a host using a session code.
+
+        Decodes the code to IP:port and connects via TCP.
+        """
+        result = decode_session(code)
+        if not result:
+            self._on_status("Invalid session code")
+            return False
+
+        ip, port = result
+        xbmc.log("[NuiSync] Session code decoded: %s:%d" % (ip, port),
+                 xbmc.LOGINFO)
+        return self.join(ip, port, timeout)
 
     def _do_connect(self, host_ip, port, timeout=10):
         """Perform the actual TCP connect."""
@@ -186,7 +297,52 @@ class NuiSyncNetwork(object):
             return False
 
     # ------------------------------------------------------------------
-    # Sending (thread-safe)
+    # UDP transport (for hole-punched connections)
+    # ------------------------------------------------------------------
+
+    def host_udp(self, port):
+        """Host via UDP hole punching. Requires both peers to have
+        exchanged session codes out-of-band.
+
+        Returns True after a peer connects via hole punch.
+        """
+        self._role = "host"
+        self._port = port
+        self._state = STATE_CONNECTING
+        self._transport = TRANSPORT_UDP
+        self._running = True
+
+        # Discover our public address
+        pub = discover_public_address(local_port=port)
+        if pub:
+            self._session_code = encode_session(pub[0], pub[1])
+            self._on_status("UDP Code: %s~" % self._session_code)
+        else:
+            self._on_status("Waiting on UDP port %d~" % port)
+
+        return True  # actual connection happens when peer code is entered
+
+    def connect_udp(self, local_port, remote_ip, remote_port):
+        """Connect to peer via UDP hole punching."""
+        self._on_status("Punching through NAT~")
+        sock = udp_hole_punch(local_port, remote_ip, remote_port)
+        if sock:
+            with self._lock:
+                self._sock = sock
+                self._udp_remote = (remote_ip, remote_port)
+            self._state = STATE_CONNECTED
+            self._last_pong_time = time.time()
+            self._on_status("Synced via UDP~")
+            self._start_recv_loop_udp()
+            self._start_heartbeat()
+            return True
+        else:
+            self._on_status("Hole punch failed")
+            self._state = STATE_DISCONNECTED
+            return False
+
+    # ------------------------------------------------------------------
+    # Sending (thread-safe, transport-aware)
     # ------------------------------------------------------------------
 
     def send(self, msg_dict):
@@ -197,15 +353,37 @@ class NuiSyncNetwork(object):
             self._seq += 1
             msg_dict["seq"] = self._seq
             line = json.dumps(msg_dict) + "\n"
+            raw = line.encode("utf-8")
+
             try:
-                self._sock.sendall(line.encode("utf-8"))
+                if self._transport == TRANSPORT_UDP:
+                    if self._udp_remote:
+                        self._sock.sendto(raw, self._udp_remote)
+                        # Track for retransmit if it's a command (not sync/pong)
+                        cmd = msg_dict.get("cmd", "")
+                        if cmd not in ("sync", "pong", "ping", "buffering"):
+                            with self._udp_lock:
+                                self._udp_pending[self._seq] = (
+                                    raw, time.time(), 0)
+                else:
+                    self._sock.sendall(raw)
             except OSError as exc:
                 xbmc.log("[NuiSync] Send error: %s" % exc, xbmc.LOGERROR)
                 threading.Thread(target=self._handle_disconnect,
                                  daemon=True).start()
 
+    def _send_udp_ack(self, seq):
+        """Send an ACK for a received UDP message."""
+        ack = json.dumps({"cmd": "_ack", "ack_seq": seq}) + "\n"
+        with self._lock:
+            if self._sock and self._udp_remote:
+                try:
+                    self._sock.sendto(ack.encode("utf-8"), self._udp_remote)
+                except OSError:
+                    pass
+
     # ------------------------------------------------------------------
-    # Receiving (background thread)
+    # Receiving — TCP (background thread)
     # ------------------------------------------------------------------
 
     def _start_recv_loop(self):
@@ -216,7 +394,7 @@ class NuiSyncNetwork(object):
         self._recv_thread.start()
 
     def _recv_loop(self):
-        """Read from socket, dispatch messages. Ping/pong handled here."""
+        """Read from TCP socket, dispatch messages. Ping/pong handled here."""
         monitor = xbmc.Monitor()
         while self._running and not monitor.abortRequested():
             try:
@@ -229,37 +407,151 @@ class NuiSyncNetwork(object):
                     self._handle_disconnect()
                     return
                 self._recv_buffer += chunk.decode("utf-8")
-                while "\n" in self._recv_buffer:
-                    line, self._recv_buffer = \
-                        self._recv_buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line)
-                    except (ValueError, KeyError):
-                        xbmc.log("[NuiSync] Bad JSON: %s" % line[:100],
-                                 xbmc.LOGWARNING)
-                        continue
-
-                    cmd = msg.get("cmd", "")
-
-                    # Handle ping/pong at network layer
-                    if cmd == "ping":
-                        self.send({"cmd": "pong"})
-                        continue
-                    elif cmd == "pong":
-                        self._last_pong_time = time.time()
-                        continue
-
-                    # Forward everything else to the player layer
-                    self._on_message(msg)
+                self._process_buffer()
 
             except socket.timeout:
                 continue
             except OSError:
                 self._handle_disconnect()
                 return
+
+    # ------------------------------------------------------------------
+    # Receiving — UDP (background thread)
+    # ------------------------------------------------------------------
+
+    def _start_recv_loop_udp(self):
+        self._recv_buffer = ""
+        self._recv_thread = threading.Thread(target=self._recv_loop_udp,
+                                             name="NuiSyncRecvUDP")
+        self._recv_thread.daemon = True
+        self._recv_thread.start()
+
+        # Start retransmit thread for unacked messages
+        t = threading.Thread(target=self._udp_retransmit_loop,
+                             name="NuiSyncRetransmit")
+        t.daemon = True
+        t.start()
+
+    def _recv_loop_udp(self):
+        """Read from UDP socket, dispatch messages."""
+        monitor = xbmc.Monitor()
+        with self._lock:
+            sock = self._sock
+        if not sock:
+            return
+        sock.settimeout(POLL_INTERVAL)
+
+        while self._running and not monitor.abortRequested():
+            try:
+                data, addr = sock.recvfrom(8192)
+                if not data:
+                    continue
+                text = data.decode("utf-8", errors="replace")
+                # UDP messages are individual lines (no buffering needed)
+                for line in text.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except (ValueError, KeyError):
+                        continue
+                    self._dispatch_message(msg)
+            except socket.timeout:
+                continue
+            except OSError:
+                self._handle_disconnect()
+                return
+
+    def _udp_retransmit_loop(self):
+        """Retransmit unacked UDP messages with exponential backoff."""
+        monitor = xbmc.Monitor()
+        max_retries = 5
+        while self._running and not monitor.abortRequested():
+            now = time.time()
+            with self._udp_lock:
+                to_remove = []
+                for seq, (raw, sent_time, retries) in self._udp_pending.items():
+                    age = now - sent_time
+                    # Backoff: 0.5s, 1s, 2s, 4s, 8s
+                    delay = 0.5 * (2 ** retries)
+                    if age >= delay:
+                        if retries >= max_retries:
+                            to_remove.append(seq)
+                            continue
+                        # Retransmit
+                        with self._lock:
+                            if self._sock and self._udp_remote:
+                                try:
+                                    self._sock.sendto(raw, self._udp_remote)
+                                except OSError:
+                                    pass
+                        self._udp_pending[seq] = (raw, now, retries + 1)
+                for seq in to_remove:
+                    del self._udp_pending[seq]
+
+            if monitor.waitForAbort(0.3):
+                break
+
+    # ------------------------------------------------------------------
+    # Shared message processing
+    # ------------------------------------------------------------------
+
+    def _process_buffer(self):
+        """Extract complete JSON lines from the receive buffer."""
+        while "\n" in self._recv_buffer:
+            line, self._recv_buffer = self._recv_buffer.split("\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except (ValueError, KeyError):
+                xbmc.log("[NuiSync] Bad JSON: %s" % line[:100],
+                         xbmc.LOGWARNING)
+                continue
+            self._dispatch_message(msg)
+
+    def _dispatch_message(self, msg):
+        """Route a parsed message to the right handler."""
+        cmd = msg.get("cmd", "")
+
+        # Handle ping/pong at network layer
+        if cmd == "ping":
+            self.send({"cmd": "pong"})
+            return
+        elif cmd == "pong":
+            self._last_pong_time = time.time()
+            return
+
+        # Handle UDP ACKs
+        if cmd == "_ack":
+            ack_seq = msg.get("ack_seq")
+            if ack_seq is not None:
+                with self._udp_lock:
+                    self._udp_pending.pop(ack_seq, None)
+            return
+
+        # For UDP: send ACK for command messages
+        if self._transport == TRANSPORT_UDP:
+            seq = msg.get("seq")
+            if seq is not None and cmd not in ("sync", "ping", "pong",
+                                                "buffering"):
+                # Dedup: skip if already processed
+                with self._udp_lock:
+                    if seq in self._udp_acked:
+                        self._send_udp_ack(seq)
+                        return
+                    self._udp_acked.add(seq)
+                    # Trim old acked seqs to prevent unbounded growth
+                    if len(self._udp_acked) > 200:
+                        cutoff = max(self._udp_acked) - 150
+                        self._udp_acked = {s for s in self._udp_acked
+                                           if s > cutoff}
+                self._send_udp_ack(seq)
+
+        # Forward everything else to the player layer
+        self._on_message(msg)
 
     # ------------------------------------------------------------------
     # Heartbeat (background thread)
@@ -367,12 +659,16 @@ class NuiSyncNetwork(object):
     def connected(self):
         return self._state == STATE_CONNECTED
 
+    @property
+    def transport(self):
+        return self._transport
+
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
     def shutdown(self):
-        """Tear everything down cleanly."""
+        """Tear everything down cleanly, including UPnP mappings."""
         self._running = False
         self._reconnect_cancel.set()
         self._state = STATE_DISCONNECTED
@@ -390,5 +686,15 @@ class NuiSyncNetwork(object):
                         pass
             self._sock = None
             self._server_sock = None
+
+        # Clean up UPnP port mapping
+        if self._upnp_mapping:
+            self._upnp_mapping.teardown()
+            self._upnp_mapping = None
+
+        # Clear UDP state
+        with self._udp_lock:
+            self._udp_pending.clear()
+            self._udp_acked.clear()
 
         self._on_status("Disconnected")

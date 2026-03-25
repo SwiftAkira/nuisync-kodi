@@ -1,14 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <settings>
-  <category label="Network">
-    <setting id="hamachi_ip"
-             type="text"
-             label="Hamachi IP (Host's 25.x.x.x)"
-             default="25.0.0.1"/>
+  <category label="Connection">
+    <setting id="use_upnp"
+             type="bool"
+             label="Auto-open port (UPnP)"
+             default="true"/>
     <setting id="port"
              type="number"
              label="Port"
              default="9876"/>
+    <setting id="hamachi_ip"
+             type="text"
+             label="Direct IP (Hamachi/LAN fallback)"
+             default="25.0.0.1"/>
     <setting id="auto_reconnect"
              type="bool"
              label="Auto-reconnect on disconnect"
