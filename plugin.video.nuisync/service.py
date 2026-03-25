@@ -211,19 +211,20 @@ def run_service():
         network = _make_network()
         player = _make_player(network, is_host=True)
 
+        # Check if default.py already discovered a session code
+        pre_code = win.getProperty("nuisync.session_code_host")
+        win.clearProperty("nuisync.session_code_host")
+
         def _host():
             nonlocal session_active
+            # Host with UPnP — the code was already shown to the user
+            # in default.py, so network.host() will regenerate it
+            # (cheap STUN call) and use it for the overlay
             success = network.host(port, use_upnp=use_upnp)
             if success:
                 session_active = True
                 win.setProperty("nuisync.active", "true")
-                # Show session code in a dialog for easy sharing
-                code = network.session_code
-                if code:
-                    xbmcgui.Dialog().ok(
-                        "NuiSync",
-                        "Friend connected!\n"
-                        "Session code was: %s" % code)
+                on_status("Friend connected!")
             else:
                 on_status("Host cancelled")
                 cleanup()

@@ -18,6 +18,9 @@
     <description lang="en">NuiSync lets you watch together in perfect harmony! Host or join a cozy watch session to sync play, pause, seek, and stop between two Kodi instances. Share a short session code — no Hamachi, no port forwarding, no server hosting required. Auto-connects via UPnP with STUN-based session codes. Falls back to direct IP for Hamachi/LAN. Pure Python sockets, no extra dependencies~ Works beautifully with Fen Light, Cocoscrapers, and TorBox.</description>
     <platform>all</platform>
     <license>MIT</license>
+    <assets>
+      <icon>icon.png</icon>
+    </assets>
   </extension>
 </addon>
 <addon id="repository.nuisync"
