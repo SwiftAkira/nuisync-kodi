@@ -84,9 +84,8 @@ def run_service():
             speed_max=speed_max, speed_min=speed_min,
         )
 
-    def start_host():
+    def start_host(room_code):
         nonlocal network, player, session_active
-        room_code = win.getProperty("nuisync.room_code")
         network = _make_network()
         player = _make_player(network, is_host=True)
 
@@ -104,9 +103,8 @@ def run_service():
         t = threading.Thread(target=_host, name="NuiSyncHost")
         t.start()
 
-    def start_join():
+    def start_join(code):
         nonlocal network, player, session_active
-        code = win.getProperty("nuisync.room_code")
         network = _make_network()
         player = _make_player(network, is_host=False)
 
@@ -123,9 +121,8 @@ def run_service():
                 "is correct." % code)
             cleanup()
 
-    def start_join_direct():
+    def start_join_direct(ip):
         nonlocal network, player, session_active
-        ip = win.getProperty("nuisync.host_ip")
         port = int(_get_setting("port", 9876, int))
         network = _make_network()
         player = _make_player(network, is_host=False)
@@ -160,15 +157,19 @@ def run_service():
             if role:
                 win.clearProperty("nuisync.role")
 
+                # Read properties BEFORE cleanup (cleanup clears them)
+                room_code = win.getProperty("nuisync.room_code")
+                host_ip = win.getProperty("nuisync.host_ip")
+
                 if role == "host":
                     cleanup()
-                    start_host()
+                    start_host(room_code)
                 elif role == "join":
                     cleanup()
-                    start_join()
+                    start_join(room_code)
                 elif role == "join_direct":
                     cleanup()
-                    start_join_direct()
+                    start_join_direct(host_ip)
                 elif role == "disconnect":
                     cleanup()
                     _notify("See you next time~")
