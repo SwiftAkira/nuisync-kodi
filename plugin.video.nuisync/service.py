@@ -289,44 +289,51 @@ def run_service():
     # ----- Main loop -----
     xbmc.log("[NuiSync] Service started~", xbmc.LOGINFO)
 
-    while not monitor.abortRequested():
-        # Check for role commands from the plugin UI
-        role = win.getProperty("nuisync.role")
-        if role:
-            win.clearProperty("nuisync.role")
+    try:
+        while not monitor.abortRequested():
+            # Check for role commands from the plugin UI
+            role = win.getProperty("nuisync.role")
+            if role:
+                win.clearProperty("nuisync.role")
 
-            if role == "host":
-                cleanup()
-                start_host()
-            elif role == "join_code":
-                cleanup()
-                start_join_code()
-            elif role == "join":
-                cleanup()
-                start_join()
-            elif role == "disconnect":
-                cleanup()
-                overlay.update("See you next time~", auto_hide=True)
+                if role == "host":
+                    cleanup()
+                    start_host()
+                elif role == "join_code":
+                    cleanup()
+                    start_join_code()
+                elif role == "join":
+                    cleanup()
+                    start_join()
+                elif role == "disconnect":
+                    cleanup()
+                    overlay.update("See you next time~", auto_hide=True)
 
-        # Check for overlay toggle
-        toggle = win.getProperty("nuisync.toggle_overlay")
-        if toggle:
-            win.clearProperty("nuisync.toggle_overlay")
-            overlay.toggle()
+            # Check for overlay toggle
+            toggle = win.getProperty("nuisync.toggle_overlay")
+            if toggle:
+                win.clearProperty("nuisync.toggle_overlay")
+                overlay.toggle()
 
-        # Monitor connection state
-        if session_active and network:
-            state = network.state
-            if state == STATE_DISCONNECTED:
-                xbmcgui.Dialog().notification(
-                    "NuiSync", "Friend disconnected~",
-                    xbmcgui.NOTIFICATION_WARNING, 3000)
-                cleanup()
+            # Monitor connection state
+            if session_active and network:
+                state = network.state
+                if state == STATE_DISCONNECTED:
+                    xbmcgui.Dialog().notification(
+                        "NuiSync", "Friend disconnected~",
+                        xbmcgui.NOTIFICATION_WARNING, 3000)
+                    cleanup()
 
-        if monitor.waitForAbort(0.5):
-            break
+            if monitor.waitForAbort(0.5):
+                break
+    except Exception as exc:
+        # Catch-all so uninstalling the addon mid-run doesn't crash Kodi
+        xbmc.log("[NuiSync] Service exception: %s" % exc, xbmc.LOGWARNING)
 
-    cleanup()
+    try:
+        cleanup()
+    except Exception:
+        pass
     xbmc.log("[NuiSync] Service stopped", xbmc.LOGINFO)
 
 
